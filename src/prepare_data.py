@@ -1,4 +1,5 @@
 import re
+import shutil
 from collections import Counter
 from pathlib import Path
 import pandas as pd
@@ -14,6 +15,7 @@ def is_real_image(path: Path) -> bool:
         and path.suffix.casefold() in IMAGE_SUFFIXES
         and not path.name.startswith("._")
         and "__MACOSX" not in path.parts
+        and "prepared" not in path.parts  # our own exported copies
         and path.parts.count("chest_xray") <= 1
     )
 
@@ -167,9 +169,43 @@ def verify_splits(df: pd.DataFrame) -> None:
     print(percent.round(1))
 
 
+def export_images(df: pd.DataFrame, out_dir: str | Path) -> pd.DataFrame:
+    """Copy images into <out_dir>/images/<label>/ and write <out_dir>/manifest.csv.
+
+    The original files are not touched. Files already copied (same size) are
+    skipped, so the function can be run again safely. Returns the manifest.
+    """
+    out_dir = Path(out_dir)
+
+    # All labels share one folder per label, so file names must be unique.
+    if not df["image_path"].map(lambda p: p.name).is_unique:
+        raise ValueError("File names are not unique; copying would overwrite files.")
+
+    relative_paths = []
+    for row in df.itertuples():
+        relative = Path("images") / row.label / row.image_path.name
+        destination = out_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        already_copied = destination.exists() and destination.stat().st_size == row.image_path.stat().st_size
+        if not already_copied:
+            shutil.copy2(row.image_path, destination)
+
+        relative_paths.append(relative.as_posix())  # forward slashes, relative to out_dir
+
+    manifest = df.assign(
+        relative_path=relative_paths,
+        source_path=df["image_path"].astype(str),
+    )[["relative_path", "label", "patient_group", "split", "source_path"]]
+
+    manifest.to_csv(out_dir / "manifest.csv", index=False)
+    print(f"Copied {len(manifest)} images and wrote {out_dir / 'manifest.csv'}")
+    return manifest
+
+
 if __name__ == "__main__":
     # Example usage
-    data_directory = Path.cwd().joinpath("data")  # Adjust the path as needed
+    data_directory = Path.cwd().joinpath("data").resolve()  # absolute path; adjust as needed
     print(f"Preparing data from directory: {data_directory}")
     image_list = find_images(data_directory)
 
@@ -191,3 +227,5 @@ if __name__ == "__main__":
     print(df["split"].value_counts())
 
     verify_splits(df)
+
+    export_images(df, data_directory / "prepared")

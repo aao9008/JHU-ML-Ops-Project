@@ -196,16 +196,35 @@ def export_images(df: pd.DataFrame, out_dir: str | Path) -> pd.DataFrame:
     manifest = df.assign(
         relative_path=relative_paths,
         source_path=df["image_path"].astype(str),
-    )[["relative_path", "label", "patient_group", "split", "source_path"]]
+    )[["relative_path", "label", "binary_label", "patient_group", "split", "source_path"]]
 
     manifest.to_csv(out_dir / "manifest.csv", index=False)
     print(f"Copied {len(manifest)} images and wrote {out_dir / 'manifest.csv'}")
     return manifest
 
+def to_binary(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of df with a 'binary_label' column: 'normal' or 'pneumonia'.
+
+    The original 'label' column is unchanged.
+    """
+    df = df.copy()
+
+    # Check for unexpected labels; we only expect 'normal', 'pneumonia_bacteria' and 'pneumonia_virus'.
+    if not df["label"].isin({"normal", "pneumonia_bacteria", "pneumonia_virus"}).all():
+        unexpected = df.loc[~df["label"].isin({"normal", "pneumonia_bacteria", "pneumonia_virus"}), "label"].unique()
+        raise ValueError(f"Unexpected labels found: {unexpected}")
+    
+    # Convert the multi-class label into a binary label: 'normal' or 'pneumonia'.
+    df["binary_label"] = df["label"].map(lambda x: "normal" if x == "normal" else "pneumonia")
+
+    return df
+
+    
 
 if __name__ == "__main__":
     # Example usage
-    data_directory = Path.cwd().joinpath("data").resolve()  # absolute path; adjust as needed
+    project_root = Path(__file__).resolve().parent.parent  # src/ -> project root
+    data_directory = project_root / "data"
     print(f"Preparing data from directory: {data_directory}")
     image_list = find_images(data_directory)
 
@@ -227,5 +246,7 @@ if __name__ == "__main__":
     print(df["split"].value_counts())
 
     verify_splits(df)
+
+    df = to_binary(df)
 
     export_images(df, data_directory / "prepared")

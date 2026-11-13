@@ -1,3 +1,4 @@
+import hashlib
 import re
 import shutil
 from collections import Counter
@@ -140,11 +141,43 @@ def assign_splits(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
+# When identical images sit in different splits, keep the copy in the most
+# protected split (lower number = kept first), so test images never end up in train.
+SPLIT_PRIORITY = {"test": 0, "val": 1, "train": 2}
+
+
+def file_hash(path: Path) -> str:
+    """Return a fingerprint (MD5) of the file's contents; identical files give identical hashes."""
+    return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def drop_duplicate_images(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of df with byte-identical images reduced to one copy.
+
+    Adds a 'content_hash' column. For each set of identical images, the copy in
+    the most protected split (test, then val, then train) is kept; ties keep the
+    first row. The remaining rows keep their original order and splits.
+    """
+    df = df.copy()
+    df["content_hash"] = df["image_path"].map(file_hash)
+
+    # Put the copy to keep first inside each identical set. A stable sort keeps
+    # the original order among rows with the same split.
+    ranked = df.assign(_rank=df["split"].map(SPLIT_PRIORITY)).sort_values("_rank", kind="stable")
+    keep = ranked.drop_duplicates("content_hash", keep="first").index
+
+    removed = df[~df.index.isin(keep)]
+    print(f"Removed {len(removed)} duplicate images: {removed['split'].value_counts().to_dict()}")
+    return df[df.index.isin(keep)]
+
+
 def verify_splits(df: pd.DataFrame) -> None:
     """Check that the splits are valid; raise ValueError if not.
 
-    Checks: every row has a valid split, no image is listed twice, and no
-    patient group appears in more than one split. Also prints class counts.
+    Checks: every row has a valid split, no image is listed twice (by path or
+    by content), and no patient group appears in more than one split. Also
+    prints class counts. Needs the 'content_hash' column from drop_duplicate_images.
     """
     # Every row must have a valid split (a missing value counts as invalid).
     if not df["split"].isin({"train", "val", "test"}).all():
@@ -153,6 +186,10 @@ def verify_splits(df: pd.DataFrame) -> None:
     # The same image must not be listed twice.
     if not df["image_path"].is_unique:
         raise ValueError("Some image paths appear more than once.")
+
+    # No two files may have identical contents, even under different names.
+    if not df["content_hash"].is_unique:
+        raise ValueError("Some images have identical contents (duplicates).")
 
     # No patient group may appear in more than one split.
     groups_per_split = df.groupby("split")["patient_group"].apply(set)
@@ -291,6 +328,8 @@ if __name__ == "__main__":
 
     df = assign_splits(df)
     print(df["split"].value_counts())
+
+    df = drop_duplicate_images(df)
 
     verify_splits(df)
 

@@ -219,7 +219,54 @@ def to_binary(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-    
+def write_vertex_csv(df:pd.DataFrame,gcs_prefix: str, label_col: str, out_dir: str | Path) -> int:
+    """Write an import CSV for a Vertex AI single-label image classification dataset.
+
+    The file has no header and one row per image with three columns:
+    ML_USE (TRAINING, VALIDATION or TEST), the image's gs:// path, and its label.
+
+    Args:
+        df: Manifest table with 'relative_path' and 'split' columns plus the
+            column named by label_col.
+        gcs_prefix: Plain string such as 'gs://my-bucket/v1' (not a Path). It is
+            joined to each relative_path.
+        label_col: Column to use as the label, e.g. 'label' (three classes) or
+            'binary_label' (normal / pneumonia).
+        out_dir: Folder to write into; the file is named vertex_<label_col>_dataset.csv.
+
+    Returns:
+        The number of rows written.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check that df split values are valid
+    split_to_ml_use = {"train": "TRAINING", "val": "VALIDATION", "test": "TEST"}
+    if not df["split"].isin(split_to_ml_use.keys()).all():
+        raise ValueError("Some rows have a missing or unexpected split value.")
+
+    # Check every label is present and follows Vertex's naming rule: it must
+    # start with a letter and contain only letters, numbers and underscores.
+    valid_label = df[label_col].astype("string").str.fullmatch(r"[A-Za-z][A-Za-z0-9_]*").fillna(False)
+    if not valid_label.all():
+        invalid = df.loc[~valid_label, label_col].unique()
+        raise ValueError(f"Missing or invalid labels in '{label_col}': {invalid}")
+
+    # Remove any trailing slash once, so paths never contain '//'
+    prefix = gcs_prefix.rstrip("/")
+
+    # Create a new DataFrame with the required columns for Vertex AI
+    vertex_df = pd.DataFrame({"ML_USE": df["split"].map(split_to_ml_use),
+                              "image_gcs_uri": prefix + "/" + df["relative_path"],
+                              "label": df[label_col]})
+
+    # Convert dataframe to CSV and save it
+    vertex_csv_path = out_dir / f"vertex_{label_col}_dataset.csv"
+    vertex_df.to_csv(vertex_csv_path, header=False ,index=False)
+    print(f"Wrote Vertex AI dataset CSV to {vertex_csv_path}")
+
+    # Return the number of rows written to the CSV
+    return vertex_df.shape[0]
 
 if __name__ == "__main__":
     # Example usage
@@ -249,4 +296,7 @@ if __name__ == "__main__":
 
     df = to_binary(df)
 
-    export_images(df, data_directory / "prepared")
+    df = export_images(df, data_directory / "prepared")
+
+    write_vertex_csv(df, gcs_prefix="gs://jhu-mlops-xray/v1", label_col="label", out_dir=data_directory / "prepared")
+    write_vertex_csv(df, gcs_prefix="gs://jhu-mlops-xray/v1", label_col="binary_label", out_dir=data_directory / "prepared")
